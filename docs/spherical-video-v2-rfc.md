@@ -52,6 +52,7 @@ aligned(8) class Stereoscopic3D extends FullBox(‘st3d’, 0, 0) {
 |   `0`   | **Monoscopic**: Indicates the video frame contains a single monoscopic view. |
 |   `1`   | **Stereoscopic Top-Bottom**: Indicates the video frame contains a stereoscopic view storing the left eye on top half of the frame and right eye at the bottom half of the frame.|
 |   `2`   | **Stereoscopic Left-Right**: Indicates the video frame contains a stereoscopic view storing the left eye on left half of the frame and right eye on the right half of the frame.|
+|   `3`   | **Stereoscopic Stereo-Custom**: Indicates the video frame contains a stereoscopic view storing left and right eyes in the frame, but its layout is application dependent, and needs to be determined elsewhere. For example, this must be used with a mesh projection that contains a mesh for each eye. In this case the layout information is stored in the meshes instead of explicitly described here.|
 
 #### Spherical Video Box (sv3d)
 ##### Definition
@@ -91,8 +92,8 @@ aligned(8) class SphericalVideoHeader extends FullBox(‘svhd’, 0, 0) {
 
 ##### Semantics
 
-- `metadata_source` is a string identifier for the source tool of the SV3D
-metadata.
+- `metadata_source` is a null-terminated string in UTF-8 characters which
+identifies the tool used to create the SV3D metadata.
 
 #### Projection Box (proj)
 ##### Definition
@@ -134,11 +135,11 @@ aligned(8) class ProjectionHeader extends FullBox(‘prhd’, 0, 0) {
 
 - Pose values are 16.16 fixed point values measuring rotation in degrees. These
   rotations transform the the projection as follows:
-  - `pose_yaw_degrees` clockwise rotation in degrees around the up vector,
+  - `pose_yaw_degrees` counter-clockwise rotation in degrees around the up vector,
      restricted to -180.0 to 180.0
   - `pose_pitch_degrees` counter-clockwise rotation in degrees around the right
      vector post yaw transform, restricted to -90.0 to 90.0
-  - `pose_roll_degrees` counter clockwise-rotation in degrees around the forward
+  - `pose_roll_degrees` clockwise-rotation in degrees around the forward
      vector post yaw and pitch transform, restricted to -180.0 to 180.0
 
 #### Projection Data Box
@@ -154,7 +155,7 @@ ProjectionDataBox in a given `proj` box.
 
 ##### Syntax
 ```
-aligned(8) class ProjectionDataBox(unsigned int(32) proj_type, unsigned int(32) version, unsigned int(32) flags)
+aligned(8) class ProjectionDataBox(unsigned int(32) proj_type, unsigned int(8)version, unsigned int(24) flags)
     extends FullBox(proj_type, version, flags) {
 }
 ```
@@ -269,11 +270,11 @@ aligned(8) class MeshProjection ProjectionDataBox(‘mshp’, 0, 0) {
      or gzip headers or a checksum. (https://tools.ietf.org/html/rfc1951)
 
 - `meshes` contain the projection meshes for rendering.  If there is only one
-  mesh box, it represents the left eye / monocular view and the stereo layout
+  mesh box, it represents the monocular view and the stereo mode
   field expressed separately in the media container is used to determine
-  the right eye view. If the mshp box contains two mesh boxes, the first box
-  represents the left eye mesh and the second box represents the right eye
-  mesh.
+  the left and right eye view in case of stereo content. If the mshp box
+  contains two mesh boxes, the first box represents the left eye mesh and the
+  second box represents the right eye mesh.
 
 #### Mesh Box (mesh)
 ##### Definition
@@ -397,17 +398,21 @@ version number.
 * (u,v) coordinates are also expressed in an OpenGL-style texture coordinate
 system, where the lower-left corner is the origin (0,0), and the upper-right is
 (1,1).
-* (u,v) coordinates need to be adjusted based on the stereo layout of the
-stream.
-   * If the stereo layout is left-right:
+* (u,v) coordinates, encoded in this box, need to be adjusted based on the
+stereo mode of the stream before rendering.
+   * If the stereo mode is monoscopic:
+      * No (u,v) coordinate adjustments are required.
+   * If the stereo mode is left-right:
       * left u' = u * 0.5
       * right u' = u * 0.5 + 0.5
-   * If the stereo layout is top-bottom:
-      * left v' = v * 0.5
-      * right v' = v * 0.5 + 0.5
-   * No adjustment is required for mono layout or when a Mesh box is provided
-     for each eye.
-
+   * If the stereo mode is top-bottom:
+      * left v' = v * 0.5 + 0.5
+      * right v' = v * 0.5
+   * If the stereo mode is stereo-custom:
+      * Two mesh boxes must be present in the mshp box.
+      * Unmodified (u,v) coordinates from the first mesh box are used for
+rendering the left eye, and unmodified (u,v) coordinates from the second mesh
+box are used for rendering the right eye.
 
 ### Example
 
@@ -451,6 +456,11 @@ As the V2 specification stores its metadata in a different location, it is
 possible for a file to contain both the V1 and V2 metadata. If both V1 and
 V2 metadata are contained they should contain semantically equivalent
 information, with V2 taking priority when they differ.
+
+Stereo mode is specified using the existing `StereoMode` element specified in
+the Matroska spec. Only `StereoMode` values that have the same meaning as the
+ones specified in the `st3d` box are allowed at this time. (e.g. 0 - mono,
+1- left-right, 3 - top-bottom, 15 (provisional) - stereo-custom).
 
 #### `Projection` master element
 ##### Definition
@@ -503,9 +513,12 @@ Private data that only applies to a specific projection.
 ##### Semantics
  * If `ProjectionType` equals 0 (Rectangular), then this element must not be
 present.
- * If `ProjectionType` equals 1 (Equirectangular), then this element must be
- present and contain the same binary data that would be stored inside an
-ISOBMFF Equirectangular Projection Box ('equi').
+ * If `ProjectionType` equals 1 (Equirectangular), then this element may be
+present. If the element is present, then it must contain the same binary data 
+that would be stored inside an ISOBMFF Equirectangular Projection Box
+('equi'). If the element is not present, then the content must be treated as
+if an element containing 20 zero bytes was present (i.e. a version 0 'equi'
+box with no flags set and all projection_bounds fields set to 0).
  * If `ProjectionType` equals 2 (Cubemap), then this element must be present
 and contain the same binary data that would be stored inside an ISOBMFF
 Cubemap Projection Box ('cbmp').
@@ -522,7 +535,7 @@ between the two container formats.
 ##### Definition
 ID: 0x7673  
 Level: 5  
-Mandatory: Yes  
+Mandatory: No  
 Type: float   
 Default: 0.0  
 Minver: 4  
@@ -532,7 +545,7 @@ Container: Projection master element
 Specifies a yaw rotation to the projection.
 
 ##### Semantics
-Value represents a clockwise rotation, in degrees, around the up vector.
+Value represents a counter-clockwise rotation, in degrees, around the up vector.
 This rotation must be applied before any `ProjectionPosePitch` or
 `ProjectionPoseRoll` rotations. The value of this field should be in the
  -180 to 180 degree range.
@@ -541,7 +554,7 @@ This rotation must be applied before any `ProjectionPosePitch` or
 ##### Definition
 ID: 0x7674  
 Level: 5  
-Mandatory: Yes  
+Mandatory: No  
 Type: float   
 Default: 0.0  
 Minver: 4  
@@ -560,7 +573,7 @@ should be in the -90 to 90 degree range.
 ##### Definition
 ID: 0x7675  
 Level: 5  
-Mandatory: Yes  
+Mandatory: No  
 Type: float   
 Default: 0.0  
 Minver: 4  
@@ -570,7 +583,7 @@ Container: Projection master element
 Specifies a roll rotation to the projection.
 
 ##### Semantics
-Value represents a counter-clockwise rotation, in degrees, around the forward
+Value represents a clockwise rotation, in degrees, around the forward
 vector. This rotation must be applied after the `ProjectionPoseYaw` and
 `ProjectionPosePitch` rotations. The value of this field should be in
 the -180 to 180 degree range.
